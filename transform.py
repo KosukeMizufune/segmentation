@@ -5,27 +5,28 @@ import numpy as np
 
 class Transform(object):
 
-    def __init__(
-            self, mean,
-            crop_size, scale_range=[0.5, 2.0]):
+    def __init__(self, mean, crop_size, rotate, horizontal_flip, scale_range):
         self.mean = mean
-        self.scale_range = scale_range
         self.crop_size = crop_size
+        self.rorate = rotate
+        self.horizontal_flip = horizontal_flip
+        self.scale_range = scale_range
 
     def __call__(self, in_data):
         img, label = in_data
-        _, H, W = img.shape
+        _, height, width = img.shape
+
         scale = np.random.uniform(self.scale_range[0], self.scale_range[1])
 
         # Scale
-        scaled_H = int(scale * H)
-        scaled_W = int(scale * W)
-        img = transforms.resize(img, (scaled_H, scaled_W), PIL.Image.BICUBIC)
+        scaled_height = int(scale * height)
+        scaled_width = int(scale * width)
+        img = transforms.resize(img, (scaled_height, scaled_width), PIL.Image.BICUBIC)
         label = transforms.resize(
-            label[None], (scaled_H, scaled_W), PIL.Image.NEAREST)[0]
+            label[None], (scaled_height, scaled_width), PIL.Image.NEAREST)[0]
 
         # Crop
-        if (scaled_H < self.crop_size[0]) or (scaled_W < self.crop_size[1]):
+        if (scaled_height < self.crop_size[0]) or (scaled_width < self.crop_size[1]):
             shorter_side = min(img.shape[1:])
             img, param = transforms.random_crop(
                 img, (shorter_side, shorter_side), True)
@@ -37,7 +38,9 @@ class Transform(object):
         angle = np.random.uniform(-10, 10)
         img = transforms.rotate(img, angle, expand=False)
         label = transforms.rotate(
-            label[None], angle, expand=False,
+            label[None],
+            angle,
+            expand=False,
             interpolation=PIL.Image.NEAREST,
             fill=-1)[0]
 
@@ -51,8 +54,9 @@ class Transform(object):
                 label[None].astype(np.float32),
                 self.crop_size, PIL.Image.NEAREST)
             label = label.astype(np.int32)[0]
-        # Horizontal flip
-        if np.random.rand() > 0.5:
+
+        # heightorizontal flip
+        if self.horizontal_flip and np.random.rand() > 0.5:
             img = transforms.flip(img, x_flip=True)
             label = transforms.flip(label[None], x_flip=True)[0]
 
