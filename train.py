@@ -1,90 +1,64 @@
-import chainer
-from chainer import cuda, optimizers, training
-from chainer.training import extensions, triggers
-from chainer.optimizer_hooks import WeightDecay
+import argparse
+
+from chainercv.extensions import SemanticSegmentationEvaluator
+from chainercv.datasets import voc_semantic_segmentation_label_names
+
+from classifier import TrainChain
+from chainercv.experimental.links import PSPNetResNet50
+from utils import create_iterator, create_model, create_trainer, trainer_extend
 
 
-def run_train(train_iter, net, evaluator, **kwargs):
-    # Optimizer
-    if kwargs['gpu_id'] >= 0:
-        net.to_gpu(kwargs['gpu_id'])
-    optimizer = optimizers.MomentumSGD(lr=kwargs['lr'])
-    optimizer.setup(net)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_file', type=str, default='models/unet.py')
+    parser.add_argument('--model_name', type=str, default='Unet')
+    parser.add_argument('--gpu_id', type=int, default=-1)
 
-    if kwargs['l2_lambda'] > 0:
-        optimizer.add_hook(WeightDecay(kwargs['l2_lambda']))
-    freeze_setup(net, optimizer, kwargs['freeze_layer'])
+    # Train settings
+    parser.add_argument('--batchsize', type=int, default=128)
+    parser.add_argument('--epoch_or_iter', type=str, default='epoch')
+    parser.add_argument('--num_epochs_or_iter', type=int, default=500)
+    parser.add_argument('--initial_lr', type=float, default=0.05)
+    parser.add_argument('--lr_decay_rate', type=float, default=0.5)
+    parser.add_argument('--lr_decay_epoch', type=float, default=25)
+    parser.add_argument('--freeze_layer', type=str, default=None)
+    parser.add_argument('--small_lr_layers', type=str, default=None)
+    parser.add_argument('--small_initial_lr', type=float, default=0.005)
+    parser.add_argument('--weight_decay', type=float, default=0.0005)
 
-    if kwargs['changed_lr_layer']:
-        for layer in kwargs['changed_lr_layer']:
-            layer.update_rule.hyperparam.lr = kwargs['changed_lr']
+    # Save and Load settings
+    parser.add_argument('--save_dir', type=str, default='result')
+    parser.add_argument('--load_path', type=str, default=None)
+    parser.add_argument('--save_trainer_interval', type=int, default=10)
 
-    # Trainer
-    updater = training.StandardUpdater(train_iter, optimizer, device=kwargs['gpu_id'])
-    trainer = training.Trainer(
-        updater, (kwargs['max_epoch'], 'epoch'), out=kwargs['result_dir'])
+    # Data augmentation settings
+    parser.add_argument('--crop_size', type=int, nargs='*', default=[28, 28])
+    parser.add_argument('--scale_range', type=int, nargs='*', default=[0.5, 2.0])
+    parser.add_argument('--rotate', type=bool, default=True)
+    parser.add_argument('--horizontal_flip', type=bool, default=True)
+    args = parser.parse_args()
 
-    if kwargs['load_dir']:
-        chainer.serializers.load_npz(kwargs['load_dir'], trainer)
-    trainer_extend(trainer,
-                   evaluator,
-                   **kwargs)
+    label_names = voc_semantic_segmentation_label_names
+    n_class = len(label_names)
+    train_iter, valid_iter = create_iterator(args.crop_size,
+                                             args.rotate,
+                                             args.horizontal_flip,
+                                             args.scale_range,
+                                             args.batchsize)
+
+    in_ch = 3
+    # model = create_model(args, in_ch, n_class, args.crop_size)
+    model = PSPNetResNet50(n_class, input_size=args.crop_size)
+    net = TrainChain(model)
+
+    evaluator = SemanticSegmentationEvaluator(valid_iter, model, label_names)
+
+    trainer = create_trainer(train_iter, net, args.gpu_id, args.initial_lr,
+                             args.weight_decay, args.freeze_layer, args.small_lr_layers,
+                             args.small_initial_lr, args.num_epochs_or_iter,
+                             args.epoch_or_iter, args.save_dir)
+
+    trainer_extend(trainer, net, evaluator, args.small_lr_layers,
+                   args.lr_decay_rate, args.lr_decay_epoch,
+                   args.epoch_or_iter, args.save_trainer_interval)
     trainer.run()
-
-
-def trainer_extend(trainer, evaluator, **kwargs):
-    def slow_drop_lr(trainer):
-        if kwargs['changed_lr_layer'] is None:
-            pass
-        else:
-            for layer in kwargs['changed_lr_layer']:
-                layer.update_rule.hyperparam.lr *= kwargs['lr_drop_rate']
-
-    # Learning rate
-    trainer.extend(
-        slow_drop_lr,
-        trigger=triggers.ManualScheduleTrigger(kwargs['lr_drop_epoch'], kwargs['unit'])
-    )
-    trainer.extend(extensions.ExponentialShift('lr', kwargs['lr_drop_rate']),
-                   trigger=triggers.ManualScheduleTrigger(kwargs['lr_drop_epoch'], kwargs['unit']))
-
-    # Observe training
-    trainer.extend(extensions.LogReport())
-    trainer.extend(extensions.observe_lr(), trigger=(1, kwargs['unit']))
-    trainer.extend(evaluator, name='val')
-    trainer.extend(extensions.PrintReport(kwargs['print_report']))
-
-    # save results of training
-    trainer.extend(extensions.PlotReport(['main/loss', 'val/main/loss'],
-                                         x_key=kwargs['unit'],
-                                         file_name='loss.png'))
-    trainer.extend(
-        extensions.PlotReport(['val/main/miou',
-                               'val/main/pixel_accuracy',
-                               'val/main/mean_class_accuracy'],
-                              x_key=kwargs['unit'], file_name='accuracy.png'))
-    trainer.extend(extensions.dump_graph('main/loss'))
-    trainer.extend(extensions.snapshot(filename=kwargs['snapshot_filename']+'{.updater.epoch}'),
-                   trigger=(kwargs['save_trainer_interval'], kwargs['unit']))
-
-
-class DelGradient(object):
-    name = 'DelGradient'
-
-    def __init__(self, deltgt):
-        self.deltgt = deltgt
-
-    def __call__(self, opt):
-        for name, param in opt.target.namedparams():
-            for d in self.deltgt:
-                if d in name:
-                    grad = param.grad
-                    with cuda.get_device(grad):
-                        grad = 0
-
-
-def freeze_setup(net, optimizer, freeze_layer):
-    if freeze_layer == 'all':
-        net.predictor.base.disable_update()
-    elif isinstance(freeze_layer, list):
-        optimizer.add_hook(DelGradient(freeze_layer))
