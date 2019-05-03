@@ -1,2 +1,3 @@
 .idea/
-pytorch-deeplab-xception
+__pycache__/
+models/__pychache__/
