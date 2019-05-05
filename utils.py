@@ -5,17 +5,13 @@ from chainer import cuda, optimizers, training, iterators
 from chainer.training import extensions, triggers
 from chainer.optimizer_hooks import WeightDecay
 from chainer.datasets import TransformDataset
-from chainercv.datasets.voc.voc_semantic_segmentation_dataset \
-    import VOCSemanticSegmentationDataset
 
 import numpy as np
 
 from transform import Transform
 
 
-def create_iterator(crop_size, rotate, horizontal_flip, scale_range, batchsize):
-    train = VOCSemanticSegmentationDataset(split='train')
-    valid = VOCSemanticSegmentationDataset(split='val')
+def create_iterator(train, valid, crop_size, rotate, horizontal_flip, scale_range, batchsize):
 
     mean = np.array(
         (123.68, 116.779, 103.939), dtype=np.float32)[:, None, None]
